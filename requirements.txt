@@ -1,0 +1,3 @@
+pandas>=2.2
+requests>=2.32
+python-dotenv>=1.0
