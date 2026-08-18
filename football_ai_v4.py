@@ -5,7 +5,7 @@ from zoneinfo import ZoneInfo
 
 import pandas as pd
 import requests
-from flask import Flask, jsonify
+from flask import Flask, jsonify, request
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).parent
@@ -71,22 +71,14 @@ def row(f):
 HISTORY_SEASON = 2024
 
 def season_for(lid):
-    """Return the current API-Football season for a league.
-    API-Football uses the year in which a season starts (e.g. 2026
-    for the 2026/27 European season).  The league id is kept in the
-    signature so this can be extended for special calendars later.
-    """
-    return now().year
+    # NIE używamy tego do aktualnych meczów. Darmowy plan API-Football
+    # blokuje sezon 2026, dlatego aktualne spotkania pobieramy po dacie.
+    return HISTORY_SEASON
 
 def history():
-
     out = []
     for lid in LEAGUES:
-        # Model history is intentionally kept on the configured
-        # historical season rather than the current season.
         data = api("/fixtures", {"league": lid, "season": HISTORY_SEASON, "status": "FT"})
-        if not data:
-            data = api("/fixtures", {"league": lid, "season": now().year - 1, "status": "FT"})
         out += [row(x) for x in data]
     df = pd.DataFrame(out).drop_duplicates("id")
     if df.empty:
@@ -96,27 +88,31 @@ def history():
 
 
 def upcoming():
+    """Pobiera AKTUALNE/nadchodzące mecze bez parametru season.
+    Dzięki temu nie wysyłamy do darmowego API żądania sezonu 2026."""
     out = []
     for lid in LEAGUES:
-        out += [row(x) for x in api(
+        data = api(
             "/fixtures",
-            {"league": lid, "season": season_for(lid), "next": 30, "timezone": TZ},
-        )]
+            {"league": lid, "next": 30, "timezone": TZ},
+        )
+        out += [row(x) for x in data]
     df = pd.DataFrame(out).drop_duplicates("id")
     if df.empty:
         return df
     df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
-    return df
+    return df.sort_values("date")
 
 
 def today_fixtures():
     out = []
     d = now().strftime("%Y-%m-%d")
     for lid in LEAGUES:
-        out += [row(x) for x in api(
+        data = api(
             "/fixtures",
-            {"league": lid, "season": season_for(lid), "date": d, "timezone": TZ},
-        )]
+            {"league": lid, "date": d, "timezone": TZ},
+        )
+        out += [row(x) for x in data]
     return pd.DataFrame(out).drop_duplicates("id")
 
 
@@ -335,13 +331,95 @@ def status_message():
     )
 
 
+def handle_update(u):
+    """Obsługuje pojedynczy update Telegrama."""
+    msg = u.get("message") or {}
+    text = (msg.get("text") or "").strip()
+    chat_id = str((msg.get("chat") or {}).get("id", ""))
+    if not text or not chat_id:
+        return
+
+    cmd = text.split()[0].split("@")[0].lower()
+    try:
+        if cmd == "/start":
+            send(
+                "🤖 Witaj! Piłkarska AI działa.\n\n"
+                "Komendy:\n"
+                "/typy — uruchamia analizę teraz\n"
+                "/wyniki — pokazuje dzisiejsze mecze i wyniki\n"
+                "/status — sprawdza działanie bota\n"
+                "/help — pomoc",
+                chat_id,
+            )
+        elif cmd in ("/help", "/pomoc"):
+            send(
+                "📌 KOMENDY\n"
+                "/typy — analiza i najlepsze dokładne wyniki\n"
+                "/wyniki — mecze z dzisiaj\n"
+                "/status — status bota\n",
+                chat_id,
+            )
+        elif cmd == "/status":
+            send(status_message(), chat_id)
+        elif cmd == "/wyniki":
+            send(results_message(), chat_id)
+        elif cmd == "/typy":
+            send("⏳ Analizuję mecze. Chwilę to potrwa...", chat_id)
+            chosen, score = make_predictions()
+            if not chosen:
+                send("🟡 Nie znalazłem teraz wystarczająco mocnych typów.", chat_id)
+            else:
+                lines = ["🎯 PIŁKARSKA AI — ANALIZA NA ŻĄDANIE", ""]
+                for i, x in enumerate(chosen, 1):
+                    lines += [
+                        f"{i}. {x['home']} - {x['away']}",
+                        f"   🎯 {x['score']} | {x['prob']:.2%}",
+                        f"   {x['label']}", ""
+                    ]
+                lines += [
+                    f"📈 Ocena: {score:.4f}", "",
+                    "To prognoza statystyczna, nie gwarancja."
+                ]
+                send("\n".join(lines), chat_id)
+        else:
+            send("Nie znam tej komendy. Wpisz /help.", chat_id)
+    except Exception as e:
+        log.exception("Błąd komendy")
+        send(f"❌ Nie udało się wykonać polecenia: {e}", chat_id)
+
+
+def configure_telegram_webhook():
+    """Na Renderze używamy webhooka zamiast getUpdates.
+    Eliminuje to błąd 409 Conflict powodowany drugim procesem pollującym."""
+    public_url = os.getenv("RENDER_EXTERNAL_URL", "").strip().rstrip("/")
+    if not TG_TOKEN or not public_url:
+        return False
+    webhook_url = public_url + "/telegram/webhook"
+    try:
+        result = tg("setWebhook", {
+            "url": webhook_url,
+            "allowed_updates": json.dumps(["message"]),
+            "drop_pending_updates": "false",
+        })
+        log.info("Telegram webhook ustawiony: %s", webhook_url)
+        return bool(result.get("ok"))
+    except Exception:
+        log.exception("Nie udało się ustawić webhooka Telegrama")
+        return False
+
+
 def command_loop():
+    """Tryb lokalny: polling. Na Renderze webhook zastępuje polling."""
+    if os.getenv("RENDER_EXTERNAL_URL"):
+        log.info("Render wykryty — używam Telegram webhook, nie getUpdates.")
+        return
+
     if not TG_TOKEN:
         log.warning("Brak TELEGRAM_BOT_TOKEN — pomijam obsługę komend.")
         return
 
     offset = None
-    log.info("Obsługa Telegrama uruchomiona.")
+    log.info("Obsługa Telegrama w trybie lokalnego pollingu uruchomiona.")
     while True:
         try:
             params = {"timeout": 25, "allowed_updates": json.dumps(["message"])}
@@ -350,63 +428,21 @@ def command_loop():
             updates = tg("getUpdates", params).get("result", [])
             for u in updates:
                 offset = u["update_id"] + 1
-                msg = u.get("message") or {}
-                text = (msg.get("text") or "").strip()
-                chat_id = str((msg.get("chat") or {}).get("id", ""))
-                if not text or not chat_id:
-                    continue
-
-                cmd = text.split()[0].split("@")[0].lower()
-                try:
-                    if cmd == "/start":
-                        send(
-                            "🤖 Witaj! Piłkarska AI działa.\n\n"
-                            "Komendy:\n"
-                            "/typy — uruchamia analizę teraz\n"
-                            "/wyniki — pokazuje dzisiejsze mecze i wyniki\n"
-                            "/status — sprawdza działanie bota\n"
-                            "/help — pomoc",
-                            chat_id,
-                        )
-                    elif cmd in ("/help", "/pomoc"):
-                        send(
-                            "📌 KOMENDY\n"
-                            "/typy — analiza i najlepsze dokładne wyniki\n"
-                            "/wyniki — mecze z dzisiaj\n"
-                            "/status — status bota\n",
-                            chat_id,
-                        )
-                    elif cmd == "/status":
-                        send(status_message(), chat_id)
-                    elif cmd == "/wyniki":
-                        send(results_message(), chat_id)
-                    elif cmd == "/typy":
-                        send("⏳ Analizuję mecze. Chwilę to potrwa...", chat_id)
-                        chosen, score = make_predictions()
-                        if not chosen:
-                            send("🟡 Nie znalazłem teraz wystarczająco mocnych typów.", chat_id)
-                        else:
-                            lines = ["🎯 PIŁKARSKA AI — ANALIZA NA ŻĄDANIE", ""]
-                            for i, x in enumerate(chosen, 1):
-                                lines += [
-                                    f"{i}. {x['home']} - {x['away']}",
-                                    f"   🎯 {x['score']} | {x['prob']:.2%}",
-                                    f"   {x['label']}", ""
-                                ]
-                            lines += [f"📈 Ocena: {score:.4f}", "",
-                                      "To prognoza statystyczna, nie gwarancja."]
-                            send("\n".join(lines), chat_id)
-                    else:
-                        send("Nie znam tej komendy. Wpisz /help.", chat_id)
-                except Exception as e:
-                    log.exception("Błąd komendy")
-                    send(f"❌ Nie udało się wykonać polecenia: {e}", chat_id)
+                handle_update(u)
         except Exception as e:
             log.exception("Błąd pętli Telegrama")
             time.sleep(10)
 
 
 app = Flask(__name__)
+
+@app.post("/telegram/webhook")
+def telegram_webhook():
+    u = request.get_json(silent=True) or {}
+    threading.Thread(target=handle_update, args=(u,), daemon=True).start()
+    return jsonify({"ok": True})
+
+
 
 
 @app.get("/")
@@ -436,6 +472,7 @@ def main():
         log.warning("Brak TELEGRAM_BOT_TOKEN.")
     port = int(os.getenv("PORT", "10000"))
 
+    configure_telegram_webhook()
     threading.Thread(target=worker, daemon=True).start()
     threading.Thread(target=command_loop, daemon=True).start()
 
