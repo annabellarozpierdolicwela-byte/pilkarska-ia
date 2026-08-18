@@ -1,19 +1,19 @@
-# Piłka AI / Master Of AI — wersja Render
+# Piłkarska AI — wersja testowa dla API-Football Free
 
-## Najważniejsza poprawka
-W tej wersji każde wywołanie API-Football `/fixtures` przekazuje parametr `season`.
+Ta wersja jest przygotowana specjalnie do sprawdzenia, czy bot może działać bez płatnego planu API-Football.
 
-Bot nie ma już twardo wpisanego `season=2024` dla aktualnych meczów. Dla każdej ustawionej ligi pobiera aktualny sezon przez `/leagues?id=...&current=true` i zapisuje go w cache na 24 godziny. Jeśli na początku sezonu aktualna liga ma zbyt mało zakończonych spotkań do modelu, bot może dodatkowo pobrać poprzedni sezon jako historię.
+## Najważniejsze
+- historia modelu używa sezonu **2024**, który Twój plan Free zgłasza jako dostępny;
+- **bieżące i nadchodzące mecze nie dostają parametru `season`** — są pobierane przez `from/to` albo `date`;
+- automatyczny skaner jest domyślnie **WYŁĄCZONY**, żeby nie zużywać 100 zapytań/dzień planu Free;
+- `/typy` uruchamia analizę tylko wtedy, gdy użytkownik wyśle komendę;
+- `/wyniki` pobiera mecze dnia;
+- cache ogranicza liczbę powtórnych zapytań;
+- logi pokazują pozostały dzienny limit API, jeśli API zwraca ten nagłówek;
+- Telegram na Renderze działa przez webhook.
 
-Nadchodzące mecze są pobierane przez `/fixtures` z `league + season + from/to`.
-Mecze dnia są pobierane przez `/fixtures` z `league + season + date`.
-
-## Komendy Telegram
-- `/start`
-- `/typy`
-- `/wyniki`
-- `/status`
-- `/help`
+## Dlaczego AUTO_SCAN jest wyłączony?
+Plan Free ma 100 zapytań dziennie. Przy 6 ligach automatyczne skanowanie co godzinę mogłoby łatwo przekroczyć ten limit. Dlatego w tej wersji testujemy najpierw `/typy` i `/wyniki` na żądanie.
 
 ## Render
 Build Command:
@@ -22,36 +22,23 @@ Build Command:
 Start Command:
 `python football_ai_v4.py`
 
-Nie zmieniaj tych poleceń.
-
 ## Environment Variables
-W Render → Service → Environment powinny być ustawione:
-
+W Render zachowaj swoje obecne zmienne:
 - `API_FOOTBALL_KEY`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
-- `TIMEZONE=Europe/Warsaw`
-- `SCAN_MINUTES=60`
-- `MAX_MATCHES=2`
-- `MIN_SCORE_PROB=0.08`
-- `MIN_COUPON_IMPROVEMENT=0.02`
-- `API_MIN_INTERVAL=7.0`
+
+Dodatkowo wersja testowa może używać:
+- `AUTO_SCAN=0` (zalecane)
+- `API_MIN_INTERVAL=7`
 - `API_MAX_RETRIES=3`
-- `LEAGUE_IDS=39,140,135,78,106,2`
 
-Nie publikuj pliku `.env` i nie wpisuj prawdziwych kluczy do repozytorium.
+**Nie dodawaj pliku `.env` do repozytorium.**
 
-## Telegram na Render
-Bot używa webhooka. Po uruchomieniu Render automatycznie ustawia webhook na `/telegram/webhook`.
-Nie uruchamiaj jednocześnie tego samego tokena Telegrama przez lokalny polling.
+## Test po deployu
+1. `/start`
+2. `/status`
+3. `/wyniki`
+4. `/typy`
 
-## Limity API
-Kod ma odstęp między żądaniami, retry dla błędów 429 oraz cache sezonów, historii i nadchodzących meczów. Pierwsze wykonanie `/typy` po wygaśnięciu cache może wykonać więcej zapytań; kolejne wykonania korzystają z cache.
-
-## Co sprawdzić po deployu
-1. Otwórz Render i poczekaj na `Deploy successful`.
-2. Wejdź w Telegram.
-3. Wyślij `/status`.
-4. Wyślij `/wyniki`.
-5. Wyślij `/typy`.
-6. Jeśli pojawi się błąd, sprawdź Render → Logs. Kod loguje błąd API zamiast ukrywać go.
+Jeśli `/typy` zwróci błąd dotyczący sezonu, wklej dokładny komunikat z Telegrama oraz fragment Render Logs z momentu wykonania komendy.
