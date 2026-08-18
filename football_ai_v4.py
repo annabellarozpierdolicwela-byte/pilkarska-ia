@@ -13,7 +13,9 @@ DATA = ROOT / "data"
 DATA.mkdir(exist_ok=True)
 LAST = DATA / "last_coupon.json"
 HISTORY_LOG = DATA / "predictions.csv"
-HISTORY_CACHE = DATA / "history_2024.csv"
+HISTORY_CACHE = DATA / "history_current.csv"
+SEASONS_CACHE = DATA / "league_seasons.json"
+SEASONS_CACHE_HOURS = 24
 HISTORY_CACHE_HOURS = 24
 
 load_dotenv(ROOT / ".env")
@@ -92,21 +94,85 @@ def row(f):
     }
 
 
-# API-Football Free plan currently limits historical seasons. 2024 is
-# intentionally used for the model history; current fixtures are requested
-# by DATE without a season parameter.
-HISTORY_SEASON = 2024
+def _load_season_cache():
+    try:
+        if not SEASONS_CACHE.exists():
+            return {}
+        if time.time() - SEASONS_CACHE.stat().st_mtime >= SEASONS_CACHE_HOURS * 3600:
+            return {}
+        data = json.loads(SEASONS_CACHE.read_text(encoding="utf-8"))
+        return {str(k): int(v) for k, v in data.items()}
+    except Exception:
+        return {}
+
+
+def _save_season_cache(data):
+    try:
+        SEASONS_CACHE.write_text(json.dumps(data, indent=2), encoding="utf-8")
+    except Exception:
+        pass
+
 
 def season_for(lid):
-    # NIE używamy tego do aktualnych meczów. Darmowy plan API-Football
-    # blokuje sezon 2026, dlatego aktualne spotkania pobieramy po dacie.
-    return HISTORY_SEASON
+    """Zwraca aktualny sezon ligi. Najpierw korzysta z cache, potem pyta API.
+    Awaryjnie używa roku rozpoczęcia bieżącego sezonu (dla większości lig
+    europejskich w drugiej połowie roku jest to bieżący rok)."""
+    cache = _load_season_cache()
+    key = str(lid)
+    if key in cache:
+        return cache[key]
+    try:
+        data = api("/leagues", {"id": lid, "current": "true"})
+        if data and data[0].get("seasons"):
+            seasons = data[0]["seasons"]
+            current = [x.get("year") for x in seasons if x.get("current")]
+            if current:
+                season = int(current[-1])
+            else:
+                season = int(seasons[-1]["year"])
+            cache[key] = season
+            _save_season_cache(cache)
+            return season
+    except Exception as e:
+        log.warning("Nie udało się pobrać bieżącego sezonu ligi %s: %s", lid, e)
+    season = now().year
+    cache[key] = season
+    _save_season_cache(cache)
+    return season
 
-def history():
+
+def history_for_season(season):
     out = []
     for lid in LEAGUES:
-        data = api("/fixtures", {"league": lid, "season": HISTORY_SEASON, "status": "FT"})
+        data = api("/fixtures", {"league": lid, "season": season, "status": "FT-AET-PEN"})
         out += [row(x) for x in data]
+    df = pd.DataFrame(out).drop_duplicates("id")
+    if df.empty:
+        return df
+    df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
+    return df.dropna(subset=["hg", "ag"]).sort_values("date")
+
+
+def history():
+    # Najpierw aktualny sezon każdej ligi. Jeśli na początku sezonu jest za
+    # mało meczów, dokładamy poprzedni sezon. Każde /fixtures ma season.
+    out = []
+    current_year = now().year
+    for lid in LEAGUES:
+        season = season_for(lid)
+        data = api("/fixtures", {"league": lid, "season": season, "status": "FT-AET-PEN"})
+        out += [row(x) for x in data]
+        if len(data) < 10 and season > 2000:
+            try:
+                old = api("/fixtures", {"league": lid, "season": season - 1, "status": "FT-AET-PEN"})
+                out += [row(x) for x in old]
+            except Exception as e:
+                log.warning("Nie udało się pobrać poprzedniego sezonu ligi %s: %s", lid, e)
+    df = pd.DataFrame(out).drop_duplicates("id")
+    if df.empty:
+        return df
+    df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
+    return df.dropna(subset=["hg", "ag"]).sort_values("date")
     df = pd.DataFrame(out).drop_duplicates("id")
     if df.empty:
         return df
@@ -139,14 +205,15 @@ def _upcoming_uncached():
             except Exception:
                 pass
 
-    # 1 request per league for 4 days instead of 4 requests per league.
+    # Jedno zapytanie /fixtures na ligę, z prawidłowym season.
     out = []
     start = now().date()
     end = start + timedelta(days=3)
     for lid in LEAGUES:
+        season = season_for(lid)
         data = api(
             "/fixtures",
-            {"league": lid, "from": start.isoformat(), "to": end.isoformat(), "timezone": TZ},
+            {"league": lid, "season": season, "from": start.isoformat(), "to": end.isoformat(), "timezone": TZ},
         )
         out += [row(x) for x in data]
 
@@ -181,7 +248,8 @@ def today_fixtures():
     out = []
     d = now().strftime("%Y-%m-%d")
     for lid in LEAGUES:
-        data = api("/fixtures", {"league": lid, "date": d, "timezone": TZ})
+        season = season_for(lid)
+        data = api("/fixtures", {"league": lid, "season": season, "date": d, "timezone": TZ})
         out += [row(x) for x in data]
     df = pd.DataFrame(out).drop_duplicates("id")
     if not df.empty:
