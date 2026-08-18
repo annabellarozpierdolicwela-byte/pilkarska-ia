@@ -1,48 +1,48 @@
-# Piłkarska AI — SAFE SOURCES / TEST
+# Piłkarska AI — wersja testowa dla API-Football Free
 
-Ta wersja nie jest uzależniona od limitu API-Football.
+Ta wersja jest przygotowana specjalnie do sprawdzenia, czy bot może działać bez płatnego planu API-Football.
 
-## Źródła
-1. TheSportsDB — bieżące/nadchodzące mecze i wyniki dnia. Darmowy klucz 123.
-2. OpenFootball football.json — publiczna historia 2025/26 dla modelu, bez klucza.
-3. API-Football — opcjonalny fallback, tylko jeśli ustawisz `API_FOOTBALL_KEY`.
-4. Lokalny cache — jeśli źródło chwilowo nie odpowiada, bot nie kończy procesu błędem.
+## Najważniejsze
+- historia modelu używa sezonu **2024**, który Twój plan Free zgłasza jako dostępny;
+- **bieżące i nadchodzące mecze nie dostają parametru `season`** — są pobierane przez `from/to` albo `date`;
+- automatyczny skaner jest domyślnie **WYŁĄCZONY**, żeby nie zużywać 100 zapytań/dzień planu Free;
+- `/typy` uruchamia analizę tylko wtedy, gdy użytkownik wyśle komendę;
+- `/wyniki` pobiera mecze dnia;
+- cache ogranicza liczbę powtórnych zapytań;
+- logi pokazują pozostały dzienny limit API, jeśli API zwraca ten nagłówek;
+- Telegram na Renderze działa przez webhook.
 
-## Najważniejsza zmiana
-`/typy` NIE MUSI zwrócić typu. Jeśli dane nie pokazują wyraźnej przewagi, bot odpowiada:
-
-"🟡 BRAK MOCNEGO SYGNAŁU NA TERAZ"
-
-Nie generuje wtedy kuponu na siłę.
-
-## Progi
-- `MIN_SIGNAL_PROB=0.57`
-- `MIN_SIGNAL_EDGE=0.10`
-- `MIN_HISTORY=50`
-
-Można je później zmienić, ale na testach lepiej zostawić domyślne.
+## Dlaczego AUTO_SCAN jest wyłączony?
+Plan Free ma 100 zapytań dziennie. Przy 6 ligach automatyczne skanowanie co godzinę mogłoby łatwo przekroczyć ten limit. Dlatego w tej wersji testujemy najpierw `/typy` i `/wyniki` na żądanie.
 
 ## Render
-Build:
+Build Command:
 `pip install -r requirements.txt`
 
-Start:
-`python football_ai_v5.py`
+Start Command:
+`python football_ai_v4.py`
 
-Wymagane:
+## Environment Variables
+W Render zachowaj swoje obecne zmienne:
+- `API_FOOTBALL_KEY`
 - `TELEGRAM_BOT_TOKEN`
 - `TELEGRAM_CHAT_ID`
 
-Opcjonalne:
-- `API_FOOTBALL_KEY`
+Dodatkowo wersja testowa może używać:
+- `AUTO_SCAN=0` (zalecane)
+- `API_MIN_INTERVAL=7`
+- `API_MAX_RETRIES=3`
 
-`THESPORTSDB_API_KEY` może pozostać jako `123`.
+**Nie dodawaj pliku `.env` do repozytorium.**
 
-## Komendy
-- `/start`
-- `/typy`
-- `/wyniki`
-- `/status`
-- `/help`
+## Test po deployu
+1. `/start`
+2. `/status`
+3. `/wyniki`
+4. `/typy`
 
-Ważne: żaden system predykcyjny nie może zagwarantować poprawności typów. Ta wersja ma przede wszystkim nie wymuszać typowania, gdy sygnał jest słaby.
+Jeśli `/typy` zwróci błąd dotyczący sezonu, wklej dokładny komunikat z Telegrama oraz fragment Render Logs z momentu wykonania komendy.
+
+
+## Ważne: sezon API-Football
+API-Football wymaga parametru `season` w zapytaniach `/fixtures` z parametrem `league`. Aktualny/testowy sezon jest ustawiany przez `CURRENT_SEASON` (domyślnie `2024`), a historia modelu przez `HISTORY_SEASON` (domyślnie `2024`). Jeśli API dla danej ligi korzysta z innego sezonu, zmień `CURRENT_SEASON` przed uruchomieniem.
