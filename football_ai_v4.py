@@ -70,11 +70,21 @@ def row(f):
 # by DATE without a season parameter.
 HISTORY_SEASON = 2024
 
+def season_for(lid):
+    """Return the current API-Football season for a league.
+    API-Football uses the year in which a season starts (e.g. 2026
+    for the 2026/27 European season).  The league id is kept in the
+    signature so this can be extended for special calendars later.
+    """
+    return now().year
+
 def history():
 
     out = []
     for lid in LEAGUES:
-        data = api("/fixtures", {"league": lid, "season": season_for(lid), "status": "FT"})
+        # Model history is intentionally kept on the configured
+        # historical season rather than the current season.
+        data = api("/fixtures", {"league": lid, "season": HISTORY_SEASON, "status": "FT"})
         if not data:
             data = api("/fixtures", {"league": lid, "season": now().year - 1, "status": "FT"})
         out += [row(x) for x in data]
