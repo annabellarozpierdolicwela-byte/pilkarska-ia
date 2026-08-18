@@ -13,6 +13,8 @@ DATA = ROOT / "data"
 DATA.mkdir(exist_ok=True)
 LAST = DATA / "last_coupon.json"
 HISTORY_LOG = DATA / "predictions.csv"
+HISTORY_CACHE = DATA / "history_2024.csv"
+HISTORY_CACHE_HOURS = 12
 
 load_dotenv(ROOT / ".env")
 
@@ -63,14 +65,13 @@ def row(f):
     }
 
 
-def season_for(lid):
-    # API-Football uses the season in which a league season started.
-    # For most European leagues in August, 2026 is correct; if 2026 has
-    # no data, history() automatically falls back to 2025.
-    return now().year
-
+# API-Football Free plan currently limits historical seasons. 2024 is
+# intentionally used for the model history; current fixtures are requested
+# by DATE without a season parameter.
+HISTORY_SEASON = 2024
 
 def history():
+
     out = []
     for lid in LEAGUES:
         data = api("/fixtures", {"league": lid, "season": season_for(lid), "status": "FT"})
@@ -208,8 +209,27 @@ def send(msg, chat_id=None):
     tg("sendMessage", {"chat_id": chat_id, "text": msg})
 
 
-def make_predictions():
+def get_model_history():
+    # Cache the 2024 history so /typy and the automatic scanner do not
+    # consume the Free plan request quota over and over.
+    if HISTORY_CACHE.exists():
+        age = time.time() - HISTORY_CACHE.stat().st_mtime
+        if age < HISTORY_CACHE_HOURS * 3600:
+            try:
+                df = pd.read_csv(HISTORY_CACHE)
+                if not df.empty:
+                    df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
+                    return df.dropna(subset=["hg", "ag"]).sort_values("date")
+            except Exception:
+                pass
     h = history()
+    if not h.empty:
+        h.to_csv(HISTORY_CACHE, index=False)
+    return h
+
+
+def make_predictions():
+    h = get_model_history()
     if len(h) < 50:
         raise RuntimeError(f"Za mało historii do analizy: {len(h)} meczów.")
     u = upcoming()
