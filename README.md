@@ -42,3 +42,7 @@ Dodatkowo wersja testowa może używać:
 4. `/typy`
 
 Jeśli `/typy` zwróci błąd dotyczący sezonu, wklej dokładny komunikat z Telegrama oraz fragment Render Logs z momentu wykonania komendy.
+
+
+## Ważne: sezon API-Football
+API-Football wymaga parametru `season` w zapytaniach `/fixtures` z parametrem `league`. Aktualny sezon jest ustawiany przez `CURRENT_SEASON` (domyślnie `2026`), a historia modelu przez `HISTORY_SEASON` (domyślnie `2024`). Jeśli API dla danej ligi korzysta z innego sezonu, zmień `CURRENT_SEASON` przed uruchomieniem.

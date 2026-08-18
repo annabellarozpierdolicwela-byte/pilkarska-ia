@@ -15,7 +15,10 @@ LAST = DATA / "last_coupon.json"
 HISTORY_LOG = DATA / "predictions.csv"
 HISTORY_CACHE = DATA / "history_2024.csv"
 HISTORY_CACHE_HOURS = 24
-HISTORY_SEASON = 2024
+HISTORY_SEASON = int(os.getenv("HISTORY_SEASON", "2024"))
+# API-Football requires season whenever league is supplied to /fixtures.
+# Domestic/European competitions use the season start year (e.g. 2026 for 2026/27).
+CURRENT_SEASON = int(os.getenv("CURRENT_SEASON", "2026"))
 
 load_dotenv(ROOT / ".env")
 
@@ -98,8 +101,9 @@ def row(f):
 
 
 # Testowa wersja dla planu Free API-Football.
-# Historia modelu korzysta z dostępnego sezonu 2024.
-# AKTUALNE mecze są pobierane wyłącznie po dacie / zakresie dat, bez season.
+# Historia modelu korzysta z sezonu HISTORY_SEASON.
+# Aktualne mecze zawsze przekazują CURRENT_SEASON, ponieważ API-Football
+# wymaga pola season przy zapytaniach /fixtures z parametrem league.
 
 def history():
     out = []
@@ -113,13 +117,13 @@ def history():
     return df.dropna(subset=["hg", "ag"]).sort_values("date")
 
 
-UPCOMING_CACHE = DATA / "upcoming.csv"
+UPCOMING_CACHE = DATA / f"upcoming_{CURRENT_SEASON}.csv"
 UPCOMING_CACHE_MINUTES = 30
 _upcoming_lock = threading.Lock()
 _history_lock = threading.Lock()
 
 def _upcoming_uncached():
-    """Pobiera aktualne i najbliższe mecze bez parametru `next`.
+    """Pobiera aktualne i najbliższe mecze po konkretnym sezonie i dacie.
 
     API-Football na planie Free blokuje parametr `next`, dlatego pobieramy
     mecze po konkretnej dacie. Sprawdzamy dzisiaj oraz kolejne 3 dni.
@@ -145,7 +149,7 @@ def _upcoming_uncached():
     for lid in LEAGUES:
         data = api(
             "/fixtures",
-            {"league": lid, "from": start.isoformat(), "to": end.isoformat(), "timezone": TZ},
+            {"league": lid, "season": CURRENT_SEASON, "from": start.isoformat(), "to": end.isoformat(), "timezone": TZ},
         )
         out += [row(x) for x in data]
 
@@ -165,7 +169,7 @@ def upcoming():
     with _upcoming_lock:
         return _upcoming_uncached()
 
-TODAY_CACHE = DATA / "today.csv"
+TODAY_CACHE = DATA / f"today_{CURRENT_SEASON}.csv"
 TODAY_CACHE_MINUTES = 5
 
 def today_fixtures():
@@ -180,7 +184,7 @@ def today_fixtures():
     out = []
     d = now().strftime("%Y-%m-%d")
     for lid in LEAGUES:
-        data = api("/fixtures", {"league": lid, "date": d, "timezone": TZ})
+        data = api("/fixtures", {"league": lid, "season": CURRENT_SEASON, "date": d, "timezone": TZ})
         out += [row(x) for x in data]
     df = pd.DataFrame(out).drop_duplicates("id")
     if not df.empty:
@@ -402,7 +406,8 @@ def status_message():
         f"🎯 Maks. typów: {MAXM}\n"
         f"📊 Minimalne prawdopodobieństwo: {MINP:.0%}\n"
         f"🛡️ Odstęp API: {API_MIN_INTERVAL:.1f}s\n"
-        f"🌍 Strefa: {TZ}"
+        f"🌍 Strefa: {TZ}\n"
+        f"📅 Sezon API: {CURRENT_SEASON}"
     )
 
 
