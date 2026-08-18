@@ -1,4 +1,4 @@
-import os, time, json, math, threading, logging
+import os, time, json, math, threading, logging, random
 from pathlib import Path
 from datetime import datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -14,7 +14,7 @@ DATA.mkdir(exist_ok=True)
 LAST = DATA / "last_coupon.json"
 HISTORY_LOG = DATA / "predictions.csv"
 HISTORY_CACHE = DATA / "history_2024.csv"
-HISTORY_CACHE_HOURS = 12
+HISTORY_CACHE_HOURS = 24
 
 load_dotenv(ROOT / ".env")
 
@@ -23,6 +23,11 @@ TG_TOKEN = os.getenv("TELEGRAM_BOT_TOKEN", "").strip()
 TG_CHAT = os.getenv("TELEGRAM_CHAT_ID", "").strip()
 TZ = os.getenv("TIMEZONE", "Europe/Warsaw")
 SCAN = int(os.getenv("SCAN_MINUTES", "60"))
+API_MIN_INTERVAL = float(os.getenv("API_MIN_INTERVAL", "7.0"))
+API_MAX_RETRIES = int(os.getenv("API_MAX_RETRIES", "3"))
+_api_lock = threading.Lock()
+_last_api_call = 0.0
+
 MAXM = int(os.getenv("MAX_MATCHES", "2"))
 MINP = float(os.getenv("MIN_SCORE_PROB", "0.08"))
 MINIMP = float(os.getenv("MIN_COUPON_IMPROVEMENT", "0.02"))
@@ -36,19 +41,41 @@ def now():
 
 
 def api(path, params):
+    """Bezpieczne API-Football: serializacja, odstęp i retry dla 429."""
+    global _last_api_call
     if not API_KEY:
         raise RuntimeError("Brak API_FOOTBALL_KEY")
-    r = requests.get(
-        BASE + path,
-        headers={"x-apisports-key": API_KEY},
-        params=params,
-        timeout=30,
-    )
-    r.raise_for_status()
-    j = r.json()
-    if j.get("errors"):
-        raise RuntimeError(str(j["errors"]))
-    return j.get("response", [])
+    for attempt in range(API_MAX_RETRIES + 1):
+        with _api_lock:
+            wait = API_MIN_INTERVAL - (time.monotonic() - _last_api_call)
+            if wait > 0:
+                time.sleep(wait)
+            _last_api_call = time.monotonic()
+            try:
+                r = requests.get(
+                    BASE + path,
+                    headers={"x-apisports-key": API_KEY},
+                    params=params,
+                    timeout=30,
+                )
+            except requests.RequestException:
+                if attempt >= API_MAX_RETRIES:
+                    raise
+                time.sleep(min(30, 5 * (2 ** attempt)))
+                continue
+        if r.status_code == 429:
+            if attempt >= API_MAX_RETRIES:
+                raise RuntimeError("API-Football: limit zapytań (429). Spróbuj ponownie za chwilę.")
+            delay = 15 * (2 ** attempt) + random.uniform(0, 2)
+            log.warning("API-Football 429 — czekam %.1f s przed ponowieniem.", delay)
+            time.sleep(delay)
+            continue
+        r.raise_for_status()
+        j = r.json()
+        if j.get("errors"):
+            raise RuntimeError(str(j["errors"]))
+        return j.get("response", [])
+    raise RuntimeError("Nie udało się pobrać danych z API-Football.")
 
 
 def row(f):
@@ -89,8 +116,10 @@ def history():
 
 UPCOMING_CACHE = DATA / "upcoming.csv"
 UPCOMING_CACHE_MINUTES = 30
+_upcoming_lock = threading.Lock()
+_history_lock = threading.Lock()
 
-def upcoming():
+def _upcoming_uncached():
     """Pobiera aktualne i najbliższe mecze bez parametru `next`.
 
     API-Football na planie Free blokuje parametr `next`, dlatego pobieramy
@@ -110,16 +139,16 @@ def upcoming():
             except Exception:
                 pass
 
+    # 1 request per league for 4 days instead of 4 requests per league.
     out = []
     start = now().date()
-    for day_offset in range(4):
-        d = (start + timedelta(days=day_offset)).isoformat()
-        for lid in LEAGUES:
-            data = api(
-                "/fixtures",
-                {"league": lid, "date": d, "timezone": TZ},
-            )
-            out += [row(x) for x in data]
+    end = start + timedelta(days=3)
+    for lid in LEAGUES:
+        data = api(
+            "/fixtures",
+            {"league": lid, "from": start.isoformat(), "to": end.isoformat(), "timezone": TZ},
+        )
+        out += [row(x) for x in data]
 
     df = pd.DataFrame(out).drop_duplicates("id")
     if df.empty:
@@ -133,16 +162,34 @@ def upcoming():
     return df
 
 
+def upcoming():
+    with _upcoming_lock:
+        return _upcoming_uncached()
+
+TODAY_CACHE = DATA / "today.csv"
+TODAY_CACHE_MINUTES = 5
+
 def today_fixtures():
+    if TODAY_CACHE.exists() and time.time() - TODAY_CACHE.stat().st_mtime < TODAY_CACHE_MINUTES * 60:
+        try:
+            cached = pd.read_csv(TODAY_CACHE)
+            if not cached.empty:
+                cached["date"] = pd.to_datetime(cached["date"], utc=True, errors="coerce")
+                return cached.dropna(subset=["date"]).sort_values("date")
+        except Exception:
+            pass
     out = []
     d = now().strftime("%Y-%m-%d")
     for lid in LEAGUES:
-        data = api(
-            "/fixtures",
-            {"league": lid, "date": d, "timezone": TZ},
-        )
+        data = api("/fixtures", {"league": lid, "date": d, "timezone": TZ})
         out += [row(x) for x in data]
-    return pd.DataFrame(out).drop_duplicates("id")
+    df = pd.DataFrame(out).drop_duplicates("id")
+    if not df.empty:
+        try:
+            df.to_csv(TODAY_CACHE, index=False)
+        except Exception:
+            pass
+    return df
 
 
 def elo(df):
@@ -245,22 +292,21 @@ def send(msg, chat_id=None):
 
 
 def get_model_history():
-    # Cache the 2024 history so /typy and the automatic scanner do not
-    # consume the Free plan request quota over and over.
-    if HISTORY_CACHE.exists():
-        age = time.time() - HISTORY_CACHE.stat().st_mtime
-        if age < HISTORY_CACHE_HOURS * 3600:
-            try:
-                df = pd.read_csv(HISTORY_CACHE)
-                if not df.empty:
-                    df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
-                    return df.dropna(subset=["hg", "ag"]).sort_values("date")
-            except Exception:
-                pass
-    h = history()
-    if not h.empty:
-        h.to_csv(HISTORY_CACHE, index=False)
-    return h
+    with _history_lock:
+        if HISTORY_CACHE.exists():
+            age = time.time() - HISTORY_CACHE.stat().st_mtime
+            if age < HISTORY_CACHE_HOURS * 3600:
+                try:
+                    df = pd.read_csv(HISTORY_CACHE)
+                    if not df.empty:
+                        df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
+                        return df.dropna(subset=["hg", "ag"]).sort_values("date")
+                except Exception:
+                    pass
+        h = history()
+        if not h.empty:
+            h.to_csv(HISTORY_CACHE, index=False)
+        return h
 
 
 def make_predictions():
@@ -356,6 +402,7 @@ def status_message():
         f"⏱ Skanowanie: co {SCAN} min\n"
         f"🎯 Maks. typów: {MAXM}\n"
         f"📊 Minimalne prawdopodobieństwo: {MINP:.0%}\n"
+        f"🛡️ Odstęp API: {API_MIN_INTERVAL:.1f}s\n"
         f"🌍 Strefa: {TZ}"
     )
 
