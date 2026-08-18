@@ -18,7 +18,7 @@ HISTORY_CACHE_HOURS = 24
 HISTORY_SEASON = int(os.getenv("HISTORY_SEASON", "2024"))
 # API-Football requires season whenever league is supplied to /fixtures.
 # Domestic/European competitions use the season start year (e.g. 2026 for 2026/27).
-CURRENT_SEASON = int(os.getenv("CURRENT_SEASON", "2026"))
+CURRENT_SEASON = int(os.getenv("CURRENT_SEASON", "2024"))
 
 load_dotenv(ROOT / ".env")
 
