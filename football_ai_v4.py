@@ -87,21 +87,50 @@ def history():
     return df.dropna(subset=["hg", "ag"]).sort_values("date")
 
 
+UPCOMING_CACHE = DATA / "upcoming.csv"
+UPCOMING_CACHE_MINUTES = 30
+
 def upcoming():
-    """Pobiera AKTUALNE/nadchodzące mecze bez parametru season.
-    Dzięki temu nie wysyłamy do darmowego API żądania sezonu 2026."""
+    """Pobiera aktualne i najbliższe mecze bez parametru `next`.
+
+    API-Football na planie Free blokuje parametr `next`, dlatego pobieramy
+    mecze po konkretnej dacie. Sprawdzamy dzisiaj oraz kolejne 3 dni.
+    Wynik jest cachowany na 30 minut, żeby niepotrzebnie nie zużywać limitu.
+    """
+    if UPCOMING_CACHE.exists():
+        age = time.time() - UPCOMING_CACHE.stat().st_mtime
+        if age < UPCOMING_CACHE_MINUTES * 60:
+            try:
+                cached = pd.read_csv(UPCOMING_CACHE)
+                if not cached.empty:
+                    cached["date"] = pd.to_datetime(
+                        cached["date"], utc=True, errors="coerce"
+                    )
+                    return cached.dropna(subset=["date"]).sort_values("date")
+            except Exception:
+                pass
+
     out = []
-    for lid in LEAGUES:
-        data = api(
-            "/fixtures",
-            {"league": lid, "next": 30, "timezone": TZ},
-        )
-        out += [row(x) for x in data]
+    start = now().date()
+    for day_offset in range(4):
+        d = (start + timedelta(days=day_offset)).isoformat()
+        for lid in LEAGUES:
+            data = api(
+                "/fixtures",
+                {"league": lid, "date": d, "timezone": TZ},
+            )
+            out += [row(x) for x in data]
+
     df = pd.DataFrame(out).drop_duplicates("id")
     if df.empty:
         return df
     df["date"] = pd.to_datetime(df["date"], utc=True, errors="coerce")
-    return df.sort_values("date")
+    df = df.dropna(subset=["date"]).sort_values("date")
+    try:
+        df.to_csv(UPCOMING_CACHE, index=False)
+    except Exception:
+        pass
+    return df
 
 
 def today_fixtures():
